@@ -26,6 +26,14 @@ else
 	OBJS=utils.o ntlm.o xcrypt.o config.o socket.o acl.o auth.o http.o forward.o direct.o scanner.o pages.o main.o win/resources.o
 endif
 
+ENABLE_KERBEROS=$(shell grep -c ENABLE_KERBEROS config/config.h)
+ifeq ($(ENABLE_KERBEROS),1)
+	OBJS+=kerberos.o
+	LDFLAGS+=-lgssapi_krb5
+endif
+
+all: $(NAME)
+
 $(NAME): configure-stamp $(OBJS)
 	@echo "Linking $@"
 	@$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)

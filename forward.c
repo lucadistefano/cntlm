@@ -38,6 +38,9 @@
 #include "scanner.h"
 #include "pages.h"
 
+#ifdef ENABLE_KERBEROS
+#include "kerberos.h"
+#endif
 int parent_curr = 0;
 pthread_mutex_t parent_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -49,6 +52,9 @@ pthread_mutex_t parent_mtx = PTHREAD_MUTEX_INITIALIZER;
  *
  * Writes required credentials into passed auth_s structure
  */
+#ifdef ENABLE_KERBEROS
+proxy_t *curr_proxy;
+#endif
 int proxy_connect(struct auth_s *credentials) {
 	proxy_t *aux;
 	int i, prev;
@@ -91,6 +97,10 @@ int proxy_connect(struct auth_s *credentials) {
 			aux = (proxy_t *)plist_get(parent_list, ++parent_curr);
 			pthread_mutex_unlock(&parent_mtx);
 			syslog(LOG_ERR, "Proxy connect failed, will try %s:%d\n", aux->hostname, aux->port);
+#ifdef ENABLE_KERBEROS
+		} else {
+			curr_proxy = aux;
+#endif
 		}
 	} while (i <= 0 && ++loop < parent_count);
 
@@ -141,13 +151,23 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 	int rc = 0;
 
 	buf = new(BUFSIZE);
+#ifdef ENABLE_KERBEROS
+	if(g_creds->haskrb && acquire_kerberos_token(curr_proxy, credentials, buf)) {
+		if (debug)
+			printf("Using Negotiation ...\n");
+	}
+	else {
+#endif
 
 	strcpy(buf, "NTLM ");
 	len = ntlm_request(&tmp, credentials);
 	if (len) {
 		to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
 		free(tmp);
+		}
+#ifdef ENABLE_KERBEROS		
 	}
+#endif
 
 	auth = dup_rr_data(request);
 	auth->headers = hlist_mod(auth->headers, "Proxy-Authorization", buf, 1);
@@ -227,6 +247,16 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 		}
 		tmp = hlist_get(auth->headers, "Proxy-Authenticate");
 		if (tmp) {
+#ifdef ENABLE_KERBEROS		
+			if(g_creds->haskrb && strncasecmp(tmp, "NEGOTIATE", 9) == 0 && acquire_kerberos_token(curr_proxy, credentials, buf)) {
+				if (debug)
+					printf("Using Negotiation ...\n");
+				request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
+				free(tmp);
+			}
+			else {
+				g_creds->haskrb = KRB_KO; //no more kerberos auth
+#endif			
 			challenge = new(strlen(tmp) + 5 + 1);
 			len = from_base64(challenge, tmp + 5);
 			if (len > NTLM_CHALLENGE_MIN) {
@@ -248,9 +278,19 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 			}
 
 			free(challenge);
+#ifdef ENABLE_KERBEROS				
+			}
+#endif			
 		} else {
-			syslog(LOG_WARNING, "No Proxy-Authenticate, NTLM not supported?\n");
+			syslog(LOG_WARNING, "No Proxy-Authenticate, NTLM/Negotiate not supported?\n");
 		}
+#ifdef ENABLE_MAX_RETRY
+	} else if (auth->code==401 || auth->code==403) {
+		if (debug)
+			printf("Authentication failed for %s on %s ...\n", credentials->user, curr_proxy->hostname);
+		rc = 0;
+		goto bailout;
+#endif
 	} else if (pretend407) {
 		if (debug)
 			printf("Client %s - forcing second request.\n", HEAD(request) ? "sent HEAD" : "has a body");

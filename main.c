@@ -60,7 +60,14 @@
 #include "forward.h"				/* code serving via parent proxy */
 #include "direct.h"				/* code serving directly without proxy */
 
+#ifdef ENABLE_KERBEROS
+#include "kerberos.h"
+#endif
 #define STACK_SIZE	sizeof(void *)*8*1024
+#ifdef FALLBACK_NOPROXY
+int force_direct = 0;
+int fallback_if_noproxy = 0;
+#endif
 
 /*
  * Global "read-only" data initialized in main(). Comments list funcs. which use
@@ -327,6 +334,11 @@ int proxy_match(const char *addr) {
 	char *ip;
 	int i;
 
+#ifdef FALLBACK_NOPROXY
+	if(force_direct)
+		return 1;
+#endif
+
 	if (noproxy_check(addr) && !yesproxy_check(addr))
 		return 1;
 
@@ -380,6 +392,17 @@ void *proxy_thread(void *thread_data) {
 
 			keep_alive = hlist_subcmp(request->headers, "Proxy-Connection", "keep-alive");
 
+#ifdef FALLBACK_NOPROXY
+			if(fallback_if_noproxy && !force_direct){
+				int sd = proxy_connect(NULL);
+				if(sd<=0) {
+					force_direct = 1;
+				}else{
+					fallback_if_noproxy = 0;
+					close(sd);
+				}
+			}
+#endif
 			if (proxy_match(request->hostname))
 				ret = direct_request(thread_data, request);
 			else
@@ -833,6 +856,11 @@ int main(int argc, char **argv) {
 				for (i = strlen(optarg)-1; i >= 0; --i)
 					optarg[i] = '*';
 				break;
+#ifdef FALLBACK_NOPROXY
+			case 'q':
+				fallback_if_noproxy = 1;
+				break;
+#endif
 			case 'R':
 				tmp = strdup(optarg);
 				head = strchr(tmp, ':');
@@ -922,6 +950,9 @@ int main(int argc, char **argv) {
 				"\t    ACL allow rule. IP or hostname, net must be a number (CIDR notation)\n");
 		fprintf(stderr, "\t-a  ntlm | nt | lm\n"
 				"\t    Authentication type - combined NTLM, just LM, or just NT. Default NTLM.\n"
+#ifdef ENABLE_KERBEROS
+				"\t    GSS activates kerberos auth: you need a cached credential.\n"
+#endif
 				"\t    It is the most versatile setting and likely to work for you.\n");
 		fprintf(stderr, "\t-B  Enable NTLM-to-basic authentication.\n");
 		fprintf(stderr, "\t-c  <config_file>\n"
@@ -956,6 +987,10 @@ int main(int argc, char **argv) {
 				"\t    Create a PID file upon successful start.\n");
 		fprintf(stderr, "\t-p  <password>\n"
 				"\t    Account password. Will not be visible in \"ps\", /proc, etc.\n");
+#ifdef FALLBACK_NOPROXY
+		fprintf(stderr, "\t-q\n"
+				"\t    if parent proxy is not reachable, then try with direct connection\n");
+#endif
 		fprintf(stderr, "\t-r  \"HeaderName: value\"\n"
 				"\t    Add a header substitution. All such headers will be added/replaced\n"
 				"\t    in the client's requests.\n");
@@ -1166,6 +1201,10 @@ int main(int argc, char **argv) {
 			free(tmp);
 		}
 
+#ifdef FALLBACK_NOPROXY
+		tmp = config_pop(cf, "FallbackNoProxy");
+		fallback_if_noproxy = (tmp!=NULL);
+#endif
 		/*
 		 * Print out unused/unknown options.
 		 */
@@ -1221,6 +1260,14 @@ int main(int argc, char **argv) {
 			g_creds->hashnt = 2;
 			g_creds->hashlm = 0;
 			g_creds->hashntlm2 = 0;
+#ifdef ENABLE_KERBEROS			
+		} else if (!strcasecmp("gss", cauth)) {
+			g_creds->haskrb = KRB_FORCE_USE_KRB;
+			g_creds->hashnt = 0;
+			g_creds->hashlm = 0;
+			g_creds->hashntlm2 = 0;
+			syslog(LOG_INFO, "Forcing GSS auth.\n");
+#endif				
 		} else {
 			syslog(LOG_ERR, "Unknown NTLM auth combination.\n");
 			myexit(1);
@@ -1251,6 +1298,7 @@ int main(int argc, char **argv) {
 		tmp = fgets(cpassword, MINIBUF_SIZE, stdin);
 		tcsetattr(0, TCSADRAIN, &termold);
 		i = strlen(cpassword) - 1;
+		//trimr(cpassword);
 		if (cpassword[i] == '\n') {
 			cpassword[i] = 0;
 			if (cpassword[i - 1] == '\r')
@@ -1311,6 +1359,11 @@ int main(int argc, char **argv) {
 		memset(cpassword, 0, strlen(cpassword));
 	}
 
+#ifdef ENABLE_KERBEROS
+	g_creds->haskrb |= check_credential();
+	if(g_creds->haskrb & KRB_CREDENTIAL_AVAILABLE)
+		syslog(LOG_INFO, "Using cached credential for GSS auth.\n");
+#endif
 	auth_strcpy(g_creds, user, cuser);
 	auth_strcpy(g_creds, domain, cdomain);
 	auth_strcpy(g_creds, workstation, cworkstation);
@@ -1358,8 +1411,11 @@ int main(int argc, char **argv) {
 	/*
 	 * If we're going to need a password, check we really have it.
 	 */
-	if (!ntlmbasic && (
-			(g_creds->hashnt && !g_creds->passnt)
+	if (!ntlmbasic &&
+#ifdef ENABLE_KERBEROS
+			!g_creds->haskrb &&
+#endif
+			((g_creds->hashnt && !g_creds->passnt)
 		     || (g_creds->hashlm && !g_creds->passlm)
 		     || (g_creds->hashntlm2 && !g_creds->passntlm2))) {
 		syslog(LOG_ERR, "Parent proxy account password (or required hashes) missing.\n");

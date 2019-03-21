@@ -6,3 +6,4 @@ config/strdup
 configure-stamp
 *.o
 cntlm
+.settings

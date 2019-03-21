@@ -208,10 +208,12 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 
 	if (debug) {
 		printf("\nSending PROXY auth request...\n");
+		printf("HEAD: %s %s %s\n", auth->method, auth->url, auth->http);
 		hlist_dump(auth->headers);
 	}
 
 	if (!headers_send(*sd, auth)) {
+		close(*sd);
 		goto bailout;
 	}
 
@@ -229,6 +231,7 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 
 	reset_rr_data(auth);
 	if (!headers_recv(*sd, auth)) {
+		close(*sd);
 		goto bailout;
 	}
 
@@ -243,6 +246,7 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 	if (auth->code == 407) {
 		if (!http_body_drop(*sd, auth)) {				// FIXME: if below fails, we should forward what we drop here...
 			rc = 0;
+			close(*sd);
 			goto bailout;
 		}
 		tmp = hlist_get(auth->headers, "Proxy-Authenticate");
@@ -269,11 +273,13 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 				} else {
 					syslog(LOG_ERR, "No target info block. Cannot do NTLMv2!\n");
 					free(challenge);
+					close(*sd);
 					goto bailout;
 				}
 			} else {
 				syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
 				free(challenge);
+				close(*sd);
 				goto bailout;
 			}
 
@@ -289,6 +295,7 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 		if (debug)
 			printf("Authentication failed for %s on %s ...\n", credentials->user, curr_proxy->hostname);
 		rc = 0;
+		close(*sd);
 		goto bailout;
 #endif
 	} else if (pretend407) {
@@ -298,6 +305,7 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 			response->code = 407;				// See explanation above
 		if (!http_body_drop(*sd, auth)) {
 			rc = 0;
+			close(*sd);
 			goto bailout;
 		}
 	}
@@ -666,8 +674,10 @@ shortcut:
 			if (plugin & PLUG_SENDHEAD) {
 				if (debug) {
 					printf("Sending headers (%d)...\n", *wsocket[loop]);
-					if (loop == 0)
+					if (loop == 0) {
+						printf("HEAD: %s %s %s\n", data[loop]->method, data[loop]->url, data[loop]->http);
 						hlist_dump(data[loop]->headers);
+					}
 				}
 
 				/*
@@ -871,7 +881,7 @@ bailout:
 	return;
 }
 
-#define MAGIC_TESTS	4
+#define MAGIC_TESTS	5
 
 void magic_auth_detect(const char *url) {
 	int i, nc, c, ign = 0, found = -1;
@@ -879,13 +889,14 @@ void magic_auth_detect(const char *url) {
 	char *tmp, *pos, *host = NULL;
 
 	struct auth_s *tcreds;
-	char *authstr[5] = { "NTLMv2", "NTLM2SR", "NT", "NTLM", "LM" };
+	char *authstr[5] = { "NTLMv2", "NTLM", "LM", "NT", "NTLM2SR" };
 	int prefs[MAGIC_TESTS][5] = {
 		/* NT, LM, NTLMv2, Flags, index to authstr[] */
 		{ 0, 0, 1, 0, 0 },
-		{ 1, 1, 0, 0, 3 },
-		{ 0, 1, 0, 0, 4 },
-		{ 2, 0, 0, 0, 1 }
+		{  1,  1,  0,      0,     1 },
+		{  0,  1,  0,      0,     2 },
+		{  1,  0,  0,      0,     3 },
+		{  2,  0,  0,      0,     4 }
 	};
 
 	tcreds = new_auth();
@@ -947,13 +958,15 @@ void magic_auth_detect(const char *url) {
 
 		reset_rr_data(res);
 		if (!headers_send(nc, req) || !headers_recv(nc, res)) {
-			printf("Connection closed\n");
+			printf("Connection closed!? Proxy doesn't talk to us.\n");
 		} else {
 			if (res->code == 407) {
-				if (hlist_subcmp_all(res->headers, "Proxy-Authenticate", "NTLM") || hlist_subcmp_all(res->headers, "Proxy-Authenticate", "BASIC")) {
-					printf("Credentials rejected\n");
+				if (hlist_subcmp_all(res->headers, "Proxy-Authenticate", "NTLM")) {
+					printf("Credentials rejected (NTLM allowed)\n");
+				} else if (hlist_subcmp_all(res->headers, "Proxy-Authenticate", "BASIC")) {
+					printf("Proxy allows BASIC, Cntlm not required so it's not supported\n");
 				} else {
-					printf("Proxy doesn't offer NTLM or BASIC\n");
+					printf("Proxy doesn't allow NTLM, Cntlm won't help\n");
 					break;
 				}
 			} else {

@@ -241,11 +241,11 @@ static int client_establish_context(char *service_name,
 
 
 /**
- * acquires a kerberos token for default credential using SPN HTTP@<thost>
+ * acquires a kerberos token for default credential using SPN HTTP@<host>
  */
 int acquire_kerberos_token(proxy_t* proxy, struct auth_s *credentials,
 		char* buf) {
-	char service_name[BUFSIZE], token[BUFSIZE];
+	char service_name[BUFSIZE], token[KRB_TOKEN_BUFSIZE];
 	OM_uint32 ret_flags, min_stat;
 
 	if (credentials->haskrb == KRB_KO) {
@@ -281,7 +281,7 @@ int acquire_kerberos_token(proxy_t* proxy, struct auth_s *credentials,
 		credentials->haskrb = KRB_OK;
 
 		to_base64((unsigned char *) token, send_tok.value, send_tok.length,
-				BUFSIZE);
+				KRB_TOKEN_BUFSIZE);
 
 		if (debug) {
 			syslog(LOG_INFO, "Token B64 (size=%d)... %s\n",
